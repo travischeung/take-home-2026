@@ -29,7 +29,7 @@ ASPECT_LOW, ASPECT_HIGH = 0.8, 1.25  # aspect ratio tolerance around 1:1
 VALID_IMAGE_TYPES = {"jpeg", "jpg", "png", "webp", "gif"}
 
 
-# --- Helpers to normalize URLs for images --- 
+# --- Helpers functions --- 
 def _normalize_url(url: str, base: Optional[str]) -> str:
     url = (url or "").strip()
     if not url:
@@ -68,6 +68,27 @@ def _parse_best_from_srcset(srcset_str: str) -> str | None:
     # Sort by score descending; among ties, first in srcset is kept.
     best = sorted(candidates, key=lambda x: x['score'], reverse=True)[0]
     return best["url"]
+
+def _dedupe_images(urls: list[str]) -> list[str]:
+    """
+    Groups images by their base identity to avoid redundant resolutions 
+    (e.g., shoe-100x100.jpg and shoe-max.jpg are treated as the same asset).
+    """
+    if not urls:
+        return []
+    best_candidates = {}
+
+    for url in urls:
+            # Strip query params and resolution-specific suffixes
+            base = url.split("?")[0]
+            identity = re.sub(
+                r'[-_](\d+x\d+|thumb|small|medium|max|large|original)', 
+                '', base, flags=re.IGNORECASE
+            )
+            # Prioritize the version with the longest URL (likely containing higher-res markers)
+            if identity not in best_candidates or len(url) > len(best_candidates[identity]):
+                best_candidates[identity] = url
+    return list[str](best_candidates.values())
 
 # --- Image processing --- 
 
@@ -156,6 +177,5 @@ def extract_image_urls(html_path: Path, base_url: Optional[str] = None) -> list[
                                 add(v["url"])
         except (json.JSONDecodeError, TypeError):
             continue
-    return urls
-
-# TODO: Handle async image filtering
+    # TODO: add deduping logic for images that may share a base image
+    return _dedupe_images(urls)
