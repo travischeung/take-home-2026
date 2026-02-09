@@ -1,7 +1,8 @@
 """
-Tests for html_parser.extract_metadata.
+Tests for html_parser.extract_metadata and html_parser.extract_distilled_content.
 
-Covers JSON-LD extraction, meta tags (og:*, name), and data-* product attributes.
+Covers JSON-LD extraction, meta tags (og:*, name), data-* product attributes,
+and Trafilatura-based main-content extraction to Markdown.
 """
 
 import json
@@ -9,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from html_parser import extract_metadata
+from html_parser import extract_metadata, extract_distilled_content
 
 
 def _write_html(path: Path, html: str) -> None:
@@ -274,6 +275,116 @@ class TestProductAttributes(unittest.TestCase):
             path.unlink(missing_ok=True)
 
 
+class TestExtractDistilledContent(unittest.TestCase):
+    """Trafilatura-based main-content extraction to Markdown."""
+
+    def test_return_type_is_str(self) -> None:
+        """Result is always a string."""
+        html = """<!DOCTYPE html><html><body><article><p>Hello world.</p></article></body></html>"""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            path = Path(f.name)
+        try:
+            out = extract_distilled_content(path)
+            self.assertIsInstance(out, str)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_empty_html_returns_empty_string(self) -> None:
+        """Empty HTML body yields empty string."""
+        html = """<!DOCTYPE html><html><head></head><body></body></html>"""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            path = Path(f.name)
+        try:
+            out = extract_distilled_content(path)
+            self.assertEqual(out, "")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_whitespace_only_returns_empty_string(self) -> None:
+        """HTML that is only whitespace yields empty string."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("   \n\t  ")
+            path = Path(f.name)
+        try:
+            out = extract_distilled_content(path)
+            self.assertEqual(out, "")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_file_not_found_raises(self) -> None:
+        """Missing file raises FileNotFoundError."""
+        path = Path("/nonexistent/path/to/file.html")
+        with self.assertRaises(FileNotFoundError):
+            extract_distilled_content(path)
+
+    def test_html_with_main_content_returns_markdown(self) -> None:
+        """Article-like HTML produces non-empty Markdown with main text."""
+        html = """<!DOCTYPE html><html><head><title>Test</title></head><body>
+        <nav>Menu</nav>
+        <main><article><h1>Product Name</h1><p>This is the main product description.</p></article></main>
+        <footer>Footer</footer>
+        </body></html>"""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            path = Path(f.name)
+        try:
+            out = extract_distilled_content(path)
+            self.assertIsInstance(out, str)
+            self.assertGreater(len(out.strip()), 0)
+            # Trafilatura often keeps main content; exact format may vary
+            self.assertTrue(
+                "Product Name" in out or "product description" in out.lower(),
+                f"Expected main content in output: {out!r}",
+            )
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_minimal_html_returns_string(self) -> None:
+        """HTML with little or no main content still returns a string (possibly empty)."""
+        html = """<!DOCTYPE html><html><head><script>var x=1;</script></head>
+        <body><nav><a href="/">Home</a></nav></body></html>"""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            path = Path(f.name)
+        try:
+            out = extract_distilled_content(path)
+            self.assertIsInstance(out, str)
+            # Trafilatura may return "" or a short extraction; both are valid
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_utf8_content_read_correctly(self) -> None:
+        """UTF-8 characters in HTML are preserved in extracted Markdown."""
+        html = """<!DOCTYPE html><html><body><article><p>Café résumé — 日本語</p></article></body></html>"""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".html", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(html)
+            path = Path(f.name)
+        try:
+            out = extract_distilled_content(path)
+            self.assertIsInstance(out, str)
+            # At least one of the UTF-8 snippets should appear
+            self.assertTrue(
+                "Café" in out or "résumé" in out or "日本語" in out,
+                f"Expected UTF-8 content in output: {out!r}",
+            )
+        finally:
+            path.unlink(missing_ok=True)
+
+
 class TestExtractMetadataIntegration(unittest.TestCase):
     """Run against real data files if present."""
 
@@ -289,3 +400,17 @@ class TestExtractMetadataIntegration(unittest.TestCase):
         self.assertIsInstance(out["product_attributes"], dict)
         # Article.com product pages typically have og/twitter meta
         self.assertGreater(len(out["meta"]), 0)
+
+
+class TestExtractDistilledContentIntegration(unittest.TestCase):
+    """Run extract_distilled_content against real data files if present."""
+
+    def test_data_dir_returns_markdown_string(self) -> None:
+        """Parse data/article.html and assert result is non-empty Markdown string."""
+        data_dir = Path(__file__).resolve().parent.parent / "data"
+        article_path = data_dir / "article.html"
+        if not article_path.exists():
+            self.skipTest("data/article.html not found")
+        out = extract_distilled_content(article_path)
+        self.assertIsInstance(out, str)
+        self.assertGreater(len(out.strip()), 0)

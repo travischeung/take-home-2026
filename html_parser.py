@@ -28,6 +28,7 @@ import trafilatura
 
 # Pick out the high value metadata before the heuristic distillation process.
 def extract_metadata(html_path: Path) -> dict:
+    """Extract high-certainty machine-readable data (JSON-LD, OpenGraph, Twitter, data-*) using BeautifulSoup. Returns a dict of metadata."""
     html_content = html_path.read_text(encoding="utf-8", errors="replace")
     soup = BeautifulSoup(html_content, "html.parser")
     output: dict = {
@@ -76,4 +77,18 @@ def extract_metadata(html_path: Path) -> dict:
     
     return output
 
-
+# Extract main content as Markdown using Trafilatura (Reader Mode heuristics).
+def extract_distilled_content(html_path: Path) -> str:
+    """Extract main content as Markdown using Trafilatura (Reader Mode heuristics). Returns markdown-formatted string."""
+    html_content = html_path.read_text(encoding="utf-8", errors="replace")
+    if not html_content.strip():
+        return ""
+    result = trafilatura.extract(
+        html_content,
+        output_format="markdown",
+        include_links=True,
+        include_images=True,
+        include_tables=True,
+        favor_recall=True,
+    )
+    return result or ""

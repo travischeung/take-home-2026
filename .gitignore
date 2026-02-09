@@ -1,5 +1,6 @@
 .env
 __pycache__/
+*.egg-info/
 
 # don't assume they're using UV
 uv.lock
