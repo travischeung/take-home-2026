@@ -116,7 +116,7 @@ def extract_distilled_content(html_path: Path) -> str:
     )
     return result or ""
 
-# Phase 1: Contextual Anchoring
+# Stage 1: Contextual Anchoring
 # Extracts high-fidelity deterministic data (JSON-LD) to anchor the AI hydration stage.
 # Adheres to Schema.org standards to ensure cross-merchant compatibility.
 def get_hybrid_context(html_path: Path) -> dict:

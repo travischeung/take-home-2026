@@ -252,3 +252,20 @@ async def filter_image_urls(
         return [r for r in results if r is not None]
 
     return await run()
+
+# Stage 2 of the data ingestion pipeline
+async def get_filtered_media(html_path: Path, base_url: Optional[str] = None) -> dict:
+    """
+    Unified entrypoint for stage 2 of pipeline.
+    Extracts candidate images from HTML and metadata, then async filters for 
+    high-fidelity product shots.
+    """
+    candidate_urls = extract_image_urls(html_path, base_url=base_url)
+    
+    if not candidate_urls:
+        return {"images": []}
+    filtered_images = await filter_image_urls(candidate_urls)
+    
+    return {
+        "images": filtered_images
+    }
