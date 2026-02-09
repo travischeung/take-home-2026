@@ -1,29 +1,24 @@
 """
-Hybrid Product Distillation Pipeline
-This module converts messy HTML into high-signal Markdown to optimize LLM performance and minimize token costs.
+Hybrid Product Distillation Pipeline (Textual Pass)
+
+This module converts messy HTML into high-signal Markdown by combining 
+deterministic metadata extraction with heuristic content distillation.
 
 Pipeline flows as follows:
-1. Deterministic Extraction (BeautifulSoup): Harvest machine-readable metadata (JSON-LD, OpenGraph) that heuristics may discard.
-2. Heuristic Distillation (Trafilatura): Extract the 'core' product story and specs while stripping navigation, 
-   ads, and boilerplate (think of this putting the page into readability mode on a browser).
-3. Asset Discovery & Filtering: Identifies product images and uses async header-checks (Fastimage) to filter by dimensions and aspect ratio.
+1. Deterministic Extraction (BeautifulSoup): Harvest machine-readable 
+   metadata (JSON-LD, OpenGraph) that heuristics may discard.
+2. Heuristic Distillation (Trafilatura): Extract the 'core' product story 
+   and specs while stripping navigation, ads, and boilerplate.
 
 Output:
-A condensed Markdown context for token optimized AI hydration.
+A condensed Markdown and metadata context for token-optimized AI hydration.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
-
-import aiohttp
-from attr import attrib
 from bs4 import BeautifulSoup
-from PIL import Image
-import io
 import trafilatura
 
 # Pick out the high value metadata before the heuristic distillation process.
@@ -32,7 +27,7 @@ def extract_metadata(html_path: Path) -> dict:
     html_content = html_path.read_text(encoding="utf-8", errors="replace")
     soup = BeautifulSoup(html_content, "html.parser")
     output: dict = {
-        "json_ld": [], # machine readable metadata
+        "json_ld": [],
         "meta": {},
         "product_attributes": {},
     }
@@ -44,7 +39,8 @@ def extract_metadata(html_path: Path) -> dict:
             continue
         try:
             data = json.loads(raw)
-            if isinstance(data, list): # prevent nested lists if the json_ld data is already a list.
+            # prevent nested lists if the json_ld data is already a list.
+            if isinstance(data, list):
                 output["json_ld"].extend(data) 
             else:
                 output["json_ld"].append(data)
