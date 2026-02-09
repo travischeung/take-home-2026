@@ -26,7 +26,7 @@ from bs4 import BeautifulSoup
 # Product-quality criteria per plan: ~1:1 aspect, both sides ≥ 500px, valid image types.
 MIN_SIDE = 500
 ASPECT_LOW, ASPECT_HIGH = 0.8, 1.25  # aspect ratio tolerance around 1:1
-VALID_IMAGE_TYPES = {"jpeg", "jpg", "png", "webp", "gif"}
+VALID_IMAGE_TYPES = {"jpeg", "jpg", "png", "webp"}
 
 
 # --- Helpers functions --- 
@@ -147,7 +147,7 @@ def extract_image_urls(html_path: Path, base_url: Optional[str] = None) -> list[
             continue
         try:
             data = json.loads(raw)
-            # json-ld will either be a dict or a list of dicts. If not, continue.
+            # JSON-LD will either be a dict or a list of dicts. If not, continue.
             if isinstance(data, list):
                 items = [x for x in data if isinstance(x, dict)]
             elif isinstance(data, dict):
@@ -177,5 +177,78 @@ def extract_image_urls(html_path: Path, base_url: Optional[str] = None) -> list[
                                 add(v["url"])
         except (json.JSONDecodeError, TypeError):
             continue
-    # TODO: add deduping logic for images that may share a base image
+
     return _dedupe_images(urls)
+
+# --- Async image filtering ---
+
+logger = logging.getLogger(__name__)
+
+# Bytes to fetch for header-based dimension checks (enough for JPEG/PNG/WebP/GIF headers).
+_HEADER_READ_SIZE = 64 * 1024
+
+
+def _is_valid_image_type(url: str) -> bool:
+    """Check URL path extension is in VALID_IMAGE_TYPES."""
+    path = urlparse(url).path.lower()
+    ext = path.rsplit(".", 1)[-1] if "." in path else ""
+    return ext in VALID_IMAGE_TYPES
+
+
+def _passes_quality(w: int, h: int) -> bool:
+    """True if both sides ≥ MIN_SIDE and aspect in [ASPECT_LOW, ASPECT_HIGH]."""
+    if w < MIN_SIDE or h < MIN_SIDE:
+        return False
+    aspect = w / h if h else 0
+    return ASPECT_LOW <= aspect <= ASPECT_HIGH
+
+
+async def _get_img_dims(session: aiohttp.ClientSession, url: str) -> Optional[Tuple[int, int]]:
+    """
+    Fetch enough bytes to read image dimensions via PIL. No quality checks or judgements are made yet.
+    Return (width, height) or None on failure.
+    """
+    try:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.content.read(_HEADER_READ_SIZE)
+        img = Image.open(io.BytesIO(data))
+        width, height = img.size
+        return (width, height)
+    except Exception as e:
+        logger.debug("Image dimension retrieval failed for %s: '%s'.", url, e)
+        return None
+
+
+async def filter_image_urls(
+    urls: list[str],
+    *,
+    max_concurrent: int = 10,
+) -> list[str]:
+    """
+    Async filter candidate URLs to product-quality images:
+    both sides ≥ MIN_SIDE, aspect in [ASPECT_LOW, ASPECT_HIGH], valid image types.
+    """
+    img_urls = [url for url in urls if _is_valid_image_type(url)]
+    if not img_urls:
+        return []
+
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def check(session: aiohttp.ClientSession, url: str) -> Optional[str]:
+        async with sem:
+            dims = await _get_img_dims(session, url)
+        
+        if dims and _passes_quality(dims[0], dims[1]):
+            return url
+        return None
+
+    async def run() -> list[str]:
+        async with aiohttp.ClientSession() as session:
+            # Fire all checks concurrently; order of results matches order of img_urls candidates.
+            results = await asyncio.gather(*[check(session, url) for url in img_urls])
+        # Drop failures and non–product-quality images (None).
+        return [r for r in results if r is not None]
+
+    return await run()
