@@ -14,13 +14,16 @@ import logging
 import json
 import re
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import aiohttp
 from PIL import Image
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+
+if TYPE_CHECKING:
+    from models import Product
 
 
 # Product-quality criteria per plan: ~1:1 aspect, both sides ≥ 500px, valid image types.
@@ -253,19 +256,64 @@ async def filter_image_urls(
 
     return await run()
 
+
+# Path substrings that indicate non-product assets (email, banner, promo). Never considered as candidates.
+# Case-insensitive; edit here to add/remove. Used so we never fetch or pass these to the model.
+NON_PRODUCT_PATH_SUBSTRINGS = ("email_sign_up", "EMAILprompt", "sign_up", "banner", "promo")
+
+
+def _drop_non_product_urls(
+    urls: list[str],
+    blocklist: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Drop URLs whose path contains any blocklist substring. Used in pipeline and in product normalization."""
+    blocklist = blocklist or NON_PRODUCT_PATH_SUBSTRINGS
+    if not urls:
+        return []
+    kept = []
+    for u in urls:
+        path = (urlparse(u).path or "").lower()
+        if not any(sub.lower() in path for sub in blocklist):
+            kept.append(u)
+    return kept
+
+
 # Stage 2 of the data ingestion pipeline
 async def get_filtered_media(html_path: Path, base_url: Optional[str] = None) -> dict:
     """
     Unified entrypoint for stage 2 of pipeline.
-    Extracts candidate images from HTML and metadata, then async filters for 
-    high-fidelity product shots.
+    Extracts candidate images from HTML and metadata, drops non-product paths (email/banner/promo),
+    then async filters for high-fidelity product shots (dimensions, aspect).
+
+    Returns:
+        images: URLs that passed dimension/aspect checks (verified product-quality).
+        candidates: All URLs that passed the path filter, before dimension check. Passed to the LLM
+                    so it can reason over them when verified is empty (e.g. og:image that failed fetch).
     """
     candidate_urls = extract_image_urls(html_path, base_url=base_url)
-    
+    candidate_urls = _drop_non_product_urls(candidate_urls)
     if not candidate_urls:
-        return {"images": []}
+        return {"images": [], "candidates": []}
     filtered_images = await filter_image_urls(candidate_urls)
-    
     return {
-        "images": filtered_images
+        "images": filtered_images,
+        "candidates": candidate_urls,
     }
+
+# --- Product image URL normalization (single concern: image URL list quality) ---
+
+def normalize_product_image_urls(product: "Product") -> "Product":
+    """
+    Backfill image_urls from variant image_url when empty; then drop any URL whose
+    path looks like non-product (email, banner, etc.).
+    """
+    urls = list(product.image_urls or [])
+    if not urls and product.variants:
+        seen = set()
+        for v in product.variants:
+            u = getattr(v, "image_url", None)
+            if u and u not in seen:
+                seen.add(u)
+                urls.append(u)
+    urls = _drop_non_product_urls(urls)
+    return product.model_copy(update={"image_urls": urls})

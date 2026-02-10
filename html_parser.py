@@ -194,7 +194,7 @@ def get_hybrid_context(html_path: Path) -> dict:
                 if val is not None and str(val).strip():
                     truth_sheet["key_features"].append(str(val).strip())
 
-    # image_urls: image (str or list) and images
+    # image_urls: from JSON-LD (fallback when Verified Media is empty or sparse)
     imgs = json_ld.get("images") or json_ld.get("image")
     for u in _to_list(imgs):
         if isinstance(u, str):
@@ -211,6 +211,14 @@ def get_hybrid_context(html_path: Path) -> dict:
         u = u.strip() if isinstance(u, str) else None
         if u:
             truth_sheet["image_urls"].append(u)
+    # Drop non-product paths (e.g. email signup) so we don't feed bad URLs to the LLM.
+    from image_processor import _drop_non_product_urls
+    truth_sheet["image_urls"] = _drop_non_product_urls(truth_sheet["image_urls"])
+    # When JSON-LD had no product image (or only bad ones), use og:image as fallback (e.g. L.L.Bean).
+    if not truth_sheet["image_urls"]:
+        og_image = (raw_meta.get("meta") or {}).get("og:image")
+        if isinstance(og_image, str) and og_image.strip():
+            truth_sheet["image_urls"].append(og_image.strip())
 
     # video_url: schema.org video can be string, VideoObject {embedUrl, contentUrl}, or array
     vid = json_ld.get("video")

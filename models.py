@@ -21,11 +21,11 @@ class Category(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name_exists(cls, v: str) -> str:
-        if not v or not isinstance(v, str):
-            raise ValueError("Category name must be a non-empty string")
+        if v is None or not isinstance(v, str):
+            return "Uncategorized"
         v = v.strip()
         if not v:
-            raise ValueError("Category name must be a non-empty string")
+            return "Uncategorized"
         # Accept any category string; if not in taxonomy, use as-is so pipeline doesn't fail.
         # Avoid substring coercion: it picks arbitrary paths (e.g. "Lighting" -> "Motor Vehicle Lighting", "Pants" -> "Motorcycle Pants").
         return v
@@ -57,3 +57,16 @@ class Product(BaseModel):
     brand: str
     colors: list[str]
     variants: list[ProductVariant]
+
+DEFAULT_PRODUCT = Product(
+    name="Unknown Product",
+    price=Price(price=0.0, currency="USD", compare_at_price=None),
+    description="",
+    key_features=[],
+    image_urls=[],
+    video_url=None,
+    category=Category(name="Uncategorized"),
+    brand="",
+    colors=[],
+    variants=[],
+)
