@@ -209,7 +209,7 @@ def _best_image_url(cw: dict) -> str | None:
     return max(candidates, key=lambda u: (_resolution_score(u), len(u)))
 
 def _harvest_colorway_images(obj: dict, out: dict) -> None:
-    """Extract from colorwayImages (Nike-style) or similar structures."""
+    """Extract from colorwayImages or similar embedded product structures."""
     colorways = obj.get("colorwayImages") or obj.get("colorways") or obj.get("variants") or []
     if not isinstance(colorways, list):
         return
@@ -451,7 +451,7 @@ def get_hybrid_context(html_path: Path) -> dict:
     # Drop non-product paths (e.g. email signup) so we don't feed bad URLs to the LLM.
     from image_processor import _drop_non_product_urls
     truth_sheet["image_urls"] = _drop_non_product_urls(truth_sheet["image_urls"])
-    # When JSON-LD had no product image (or only bad ones), use og:image as fallback (e.g. L.L.Bean).
+    # When JSON-LD has no usable product image, use og:image as a generic fallback.
     if not truth_sheet["image_urls"]:
         og_image = (raw_meta.get("meta") or {}).get("og:image")
         if isinstance(og_image, str) and og_image.strip():
