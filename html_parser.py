@@ -17,7 +17,10 @@ A condensed Markdown and metadata context for token-optimized AI hydration.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+from urllib.parse import urlparse
+
 from bs4 import BeautifulSoup
 import trafilatura
 
@@ -42,29 +45,168 @@ def _norm_float(val):
     except (TypeError, ValueError):
         return None
 
+_HYDRATION_KEYS = ("__SERVER_DATA__", "__INITIAL_STATE__")
+
+def _parse_window_json(raw: str) -> list[dict]:
+    """Extract JSON from window.__X__ = {...} in plain scripts."""
+    out = []
+    for key in _HYDRATION_KEYS:
+        m = re.search(rf"window\.{re.escape(key)}\s*=\s*(\{{)", raw)
+        if not m:
+            continue
+        start = m.start(1)
+        depth, i = 0, start
+        for i, c in enumerate(raw[start:], start):
+            if c == "{": depth += 1
+            elif c == "}": depth -= 1
+            if depth == 0:
+                try:
+                    out.append(json.loads(raw[start : i + 1]))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                break
+    return out
+
+def _harvest_product_media(product: dict, out: dict) -> None:
+    """Extract variants from product.media + product.questions (COLOR)."""
+    media = product.get("media") or []
+    if not isinstance(media, list):
+        return
+    questions = product.get("questions") or []
+    color_answers = []
+    for q in questions:
+        if isinstance(q, dict) and str(q.get("type") or "").upper() == "COLOR":
+            color_answers = q.get("answers") or []
+            break
+    for i, ans in enumerate(color_answers):
+        if not isinstance(ans, dict):
+            continue
+        color = (ans.get("title") or "").strip()
+        src = None
+        if i < len(media) and isinstance(media[i], dict):
+            src = (media[i].get("src") or media[i].get("url")) and str(media[i].get("src") or media[i].get("url", "")).strip()
+        if color and color not in out["colors"]:
+            out["colors"].append(color)
+        if src and src not in out["image_urls"]:
+            out["image_urls"].append(src)
+        out["variants"].append({"sku": None, "color": color or None, "size": None, "price": None, "image_url": src})
+
 def _extract_product_from_embedded(data: dict) -> dict:
     """
-    Extract product-like data from embedded JSON (Next.js, Nuxt, or heuristic).
+    Extract product-like data from embedded JSON (Next.js, Nuxt, hydration, or heuristic).
     Returns dict with colors, variants, image_urls (only non-empty fields).
     """
     result: dict = {"colors": [], "variants": [], "image_urls": []}
 
-    # Next.js: props.pageProps or props.__N_PAGE_PROPS__
+    product = data.get("product")
+    if isinstance(product, dict):
+        _harvest_product_media(product, result)
+
     props = data.get("props") or {}
     page_props = props.get("pageProps") or props.get("__N_PAGE_PROPS__") or props
     if page_props and isinstance(page_props, dict):
         _harvest_colorway_images(page_props, result)
 
-    # Nuxt: data or data.data
     nuxt = data.get("data")
     if isinstance(nuxt, dict):
         _harvest_colorway_images(nuxt.get("data", nuxt) if isinstance(nuxt.get("data"), dict) else nuxt, result)
 
-    # Heuristic: recursive search for product-like keys
     if not result["colors"] and not result["variants"] and not result["image_urls"]:
         _heuristic_search(data, result, depth=0, max_depth=4)
 
     return {k: v for k, v in result.items() if v}
+
+def _resolution_score(url: str) -> int:
+    """Higher score = likely higher resolution. Deprioritize thumb/default/small; prefer pdp/large/original.
+    Penalize explicit small dimensions in path (e.g. t_PDP_144_v1) and query (e.g. wid=65)."""
+    if not url:
+        return 0
+    u = url.lower()
+    score = 0
+    if "thumb" in u or "small" in u or "default" in u:
+        score -= 1
+    # Explicit small dimensions in CDN template segments (e.g. t_PDP_144_v1) indicate thumbnails.
+    # Avoid matching product IDs like 224626_1176_41 by requiring a "t_" template prefix.
+    if re.search(r"t_[a-z0-9_]*[_-]?(?:1[0-4][0-9]|[0-5][0-9])(?:[_\-/]|$)", u):
+        score -= 2
+    # Explicit small dimensions in query params (wid=65, hei=100) indicate thumbnails
+    if re.search(r"[?&](?:wid|hei|w|h|size)=[0-9]{1,3}(?:[&]|$)", u):
+        score -= 2
+    if "pdp" in u or "large" in u or "original" in u or "hero" in u or "full" in u:
+        score += 1
+    # Prefer larger dimension hints (e.g. t_web_pdp_535, t_web_pdp_936) over generic pdp
+    for dim in ("535", "936", "1080", "1440"):
+        if dim in u:
+            score += 1
+            break
+    return score
+
+
+def _image_identity(url: str) -> str | None:
+    """Extract stable image identity from URL for matching across resolution variants.
+    Works for CDN URLs that use UUIDs or path segments to identify the same asset."""
+    if not url or not url.strip():
+        return None
+    path = urlparse(url).path
+    # UUID-like segment (e.g. u_9ddf04c7-xxxx-xxxx-xxxx) common in CDN image paths
+    m = re.search(
+        r"[a-z]*_?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+        path,
+        re.I,
+    )
+    if m:
+        return m.group(1).lower()
+    # Fallback: last non-empty path segment (often filename or id)
+    parts = [p for p in path.split("/") if p]
+    return parts[-1].lower() if parts else None
+
+
+def upgrade_variant_urls(truth_sheet: dict, image_candidates: list[str]) -> None:
+    """Upgrade variant image_url when a higher-resolution candidate exists for the same image.
+    Mutates truth_sheet in place. Uses image identity (e.g. UUID in path) to match variants
+    to candidates, same principle as preferring embedded product.media URLs over low-res fallbacks."""
+    variants = truth_sheet.get("variants") or []
+    candidates = image_candidates or []
+    if not variants or not candidates:
+        return
+    # Build map: identity -> best candidate URL (by resolution score)
+    id_to_best: dict[str, str] = {}
+    for url in candidates:
+        if not url or not isinstance(url, str):
+            continue
+        ident = _image_identity(url)
+        if not ident:
+            continue
+        score = _resolution_score(url)
+        if ident not in id_to_best or score > _resolution_score(id_to_best[ident]):
+            id_to_best[ident] = url
+    for var in variants:
+        if not isinstance(var, dict):
+            continue
+        current = var.get("image_url")
+        if not current or not isinstance(current, str):
+            continue
+        ident = _image_identity(current)
+        if not ident or ident not in id_to_best:
+            continue
+        best = id_to_best[ident]
+        if _resolution_score(best) > _resolution_score(current):
+            var["image_url"] = best
+
+def _best_image_url(cw: dict) -> str | None:
+    """Pick highest-resolution image URL from variant dict. Checks common keys."""
+    candidates = []
+    for key in ("heroImg", "fullSizeImg", "pdpImg", "portraitImg", "squarishImg", "image"):
+        val = cw.get(key)
+        if isinstance(val, str) and val.strip():
+            candidates.append(val.strip())
+        elif isinstance(val, dict):
+            u = val.get("url") or val.get("contentUrl")
+            if isinstance(u, str) and u.strip():
+                candidates.append(u.strip())
+    if not candidates:
+        return None
+    return max(candidates, key=lambda u: (_resolution_score(u), len(u)))
 
 def _harvest_colorway_images(obj: dict, out: dict) -> None:
     """Extract from colorwayImages (Nike-style) or similar structures."""
@@ -75,9 +217,7 @@ def _harvest_colorway_images(obj: dict, out: dict) -> None:
         if not isinstance(cw, dict):
             continue
         color = (cw.get("colorDescription") or cw.get("color") or cw.get("name")) and str(cw.get("colorDescription") or cw.get("color") or cw.get("name", "")).strip()
-        im = cw.get("image")
-        img = cw.get("squarishImg") or cw.get("portraitImg") or (im.get("url") or im.get("contentUrl") if isinstance(im, dict) else im)
-        img = img.strip() if isinstance(img, str) else None
+        img = _best_image_url(cw)
         if color and color not in out["colors"]:
             out["colors"].append(color)
         if img and img not in out["image_urls"]:
@@ -147,7 +287,6 @@ def extract_metadata(html_path: Path) -> dict:
         except (json.JSONDecodeError, TypeError):
             continue
 
-    # Embedded JSON: Next.js, Nuxt, and other application/json scripts.
     for script in soup.find_all("script", type="application/json"):
         raw = script.string
         if not raw or not raw.strip():
@@ -158,6 +297,16 @@ def extract_metadata(html_path: Path) -> dict:
                 output["embedded_json"].append(data)
         except (json.JSONDecodeError, TypeError):
             continue
+
+    for script in soup.find_all("script"):
+        if script.get("type") == "application/json":
+            continue
+        raw = script.string
+        if not raw or len(raw) < 50:
+            continue
+        for data in _parse_window_json(raw):
+            if isinstance(data, dict):
+                output["embedded_json"].append(data)
 
     # Check for high value tags ie: "og:*", "product:*", "twitter:*", and "name"
     for tag in soup.find_all("meta"):

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from pydantic import ValidationError
 
-from html_parser import get_hybrid_context
+from html_parser import get_hybrid_context, upgrade_variant_urls
 from image_processor import get_filtered_media
 from models import Product, DEFAULT_PRODUCT
 
@@ -94,10 +94,11 @@ async def run_pipeline(html_path: str):
     verified_images = media["images"]
     image_candidates = media.get("candidates", [])
     image_metadata = media.get("candidate_metadata", [])
+    upgrade_variant_urls(truth_sheet, image_candidates)
 
     try:
         response = await ai.responses(
-            "google/gemini-2.5-flash-lite",
+            "openai/gpt-5-nano",
             [
                 {
                     "role": "system",
