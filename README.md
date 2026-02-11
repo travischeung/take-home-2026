@@ -42,8 +42,6 @@ The dev server runs at `http://localhost:5173`. The frontend calls the API at `h
 
 ## Architecture Overview
 
-<!-- Fill in the sections below. Use the guiding questions to shape your overview. -->
-
 ### High-Level Flow
 
 **User experience:** Open the app → browse product grid → click a product → 
@@ -83,7 +81,7 @@ The pipeline has two stages:
 - Receives: structured data (truth sheet) + distilled content + verified images
 - Outputs: Complete Product JSON matching the Pydantic schema
 - Why LLM? Product pages are messy and diverse. A single generic prompt 
-  handles Nike, Patagonia, L.L.Bean, etc. without site-specific logic.
+  handles a wide variety of unrelated merchants without site-specific logic.
 
 **Image processing** (image_processor.py) runs in parallel:
 - Extracts image URLs from HTML
@@ -121,5 +119,41 @@ The pipeline has two stages:
 - API endpoints just read this cached JSON (no live recompute).  
 - No per-request scraping; data is only updated when you restart the server (re-extracts everything on boot).
 
+## Known Limitations
 
-```
+**Size variant extraction:** While the pipeline successfully extracts color 
+variants across all products, size information is inconsistently captured. 
+This is due to sites encoding sizes differently—some in JSON-LD variant 
+arrays, others in separate JavaScript state, others in dropdown options.
+
+**Impact:** Product schema populates, but size field in variants may be null 
+for some products.
+
+**Production approach:** I'd add extraction quality metrics (field population 
+rate per site) and iterate on the parsing logic for sites with low size 
+extraction rates. Likely need to parse `<select>` elements for size dropdowns 
+as a fallback when JSON-LD doesn't have size data.
+
+
+## System Design:
+
+Context:
+The system I've built uses a page agnostic 2 stage pipeline that first extracts machine readable structured data, then extracts human readable high-value text before handing it to a LLM model to handle the reasoning. The page agnostic nature of the design enables this system to be reused across the internet. Emphasis is placed on extracting data that follow ecommerce conventions (ala schema.org), while fallbacks exist in the case of messy websites that may not conform to the expected structures.
+
+Scaling issues:
+My pipeline already processes files asynchronously, meaning that HTML parsing, image processing, and LLM schema hydration happen concurrently. With these 5 sample products, this takes ~30 seconds, but it is bottlenecked by the LLM, not IO. Because we can't consistently speed up LLM response times, I will focus on increasing parallel runs. We can increase the number of concurrent calls by having an SQS queue feed URLs in to an ECS worker fleet, which then writes the extracted products to a PostgreSQL database. The pipeline is already stateless, making this kind of horizontal scaling simple. At optimized speed (~6s per product after variant deduplication), one worker processes 14,400 products daily. Scale to 1,000 concurrent workers and you hit 14.4 million products per day, completing a 50M product backfill in roughly 3.5 days.
+
+What will scale from my solution:
+- Stateless
+- Asynchronous parallel processing of files
+- Generic Extraction
+- Deterministic Filtering
+
+What won't scale from my solution:
+- Single machine constraints
+- Large, sometimes unoptimized payloads to the LLM
+- Lack of caching
+- Variant deduplication
+
+Frontend:
+To agentic apps, I'd provide semantic search (/products/search?q="comfortable running shoes under $150"), product comparison (/products/compare returning structured feature diffs), similarity matching (/products/{id}/similar), and category filtering. Developers could benefit from webhook subscriptions (to stay up to date with price changes, stock alerts, etc), extraction SDK (to import competitor data, enrich catalogs, build comparison tools, etc), and structured data export (bulk access to product catalog with embeddings).
